@@ -2,6 +2,8 @@ import os
 import sys
 
 import fire
+import os
+import sys
 import gradio as gr
 import torch
 import transformers
@@ -30,6 +32,7 @@ def main(
     prompt_template: str = "",  # The prompt template to use, will default to alpaca.
     server_name: str = "0.0.0.0",  # Allows to listen on all interfaces by providing '0.
     share_gradio: bool = False,
+    offload_dir: str = "./offload"  # 추가된 부분
 ):
     base_model = base_model or os.environ.get("BASE_MODEL", "")
     assert (
@@ -38,39 +41,28 @@ def main(
 
     prompter = Prompter(prompt_template)
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
-    if device == "cuda":
-        model = LlamaForCausalLM.from_pretrained(
-            base_model,
-            load_in_8bit=load_8bit,
-            torch_dtype=torch.float16,
-            device_map="auto",
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            torch_dtype=torch.float16,
-        )
-    elif device == "mps":
-        model = LlamaForCausalLM.from_pretrained(
-            base_model,
-            device_map={"": device},
-            torch_dtype=torch.float16,
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            device_map={"": device},
-            torch_dtype=torch.float16,
-        )
+
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
     else:
-        model = LlamaForCausalLM.from_pretrained(
-            base_model, device_map={"": device}, low_cpu_mem_usage=True
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            device_map={"": device},
-        )
+        device = "cpu"
+
+    model = LlamaForCausalLM.from_pretrained(
+      base_model,
+      load_in_8bit=load_8bit,
+      torch_dtype=torch.float16,
+      device_map="auto",
+      offload_folder="./offload"
+    )
+    model = PeftModel.from_pretrained(
+      model,
+      lora_weights,
+      torch_dtype=torch.float16,
+      device_map="auto",
+      offload_folder="./offload"
+    )
 
     # unwind broken decapoda-research config
     model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
@@ -91,7 +83,8 @@ def main(
         top_p=0.75,
         top_k=40,
         num_beams=4,
-        max_new_tokens=128,
+        max_new_tokens=256,
+        repetition_penalty=4.8,
         stream_output=False,
         **kwargs,
     ):
@@ -103,6 +96,7 @@ def main(
             top_p=top_p,
             top_k=top_k,
             num_beams=num_beams,
+            repetition_penalty=float(repetition_penalty),
             **kwargs,
         )
 
@@ -161,31 +155,34 @@ def main(
     gr.Interface(
         fn=evaluate,
         inputs=[
-            gr.components.Textbox(
+            gr.Textbox(
                 lines=2,
                 label="Instruction",
                 placeholder="Tell me about alpacas.",
             ),
-            gr.components.Textbox(lines=2, label="Input", placeholder="none"),
-            gr.components.Slider(
-                minimum=0, maximum=1, value=0.1, label="Temperature"
+            gr.Textbox(lines=2, label="Input", placeholder="none"),
+            gr.Slider(
+                minimum=0, maximum=1, value=0.7, label="Temperature"
             ),
-            gr.components.Slider(
-                minimum=0, maximum=1, value=0.75, label="Top p"
+            gr.Slider(
+                minimum=0, maximum=1, value=0.1, label="Top p"
             ),
-            gr.components.Slider(
+            gr.Slider(
                 minimum=0, maximum=100, step=1, value=40, label="Top k"
             ),
-            gr.components.Slider(
+            gr.Slider(
                 minimum=1, maximum=4, step=1, value=4, label="Beams"
             ),
-            gr.components.Slider(
-                minimum=1, maximum=2000, step=1, value=128, label="Max tokens"
+            gr.Slider(
+                minimum=1, maximum=2000, step=1, value=256, label="Max tokens"
             ),
-            gr.components.Checkbox(label="Stream output"),
+            gr.Slider(
+                minimum=1., maximum=5., step=0.1, value=4.8, label="Repetation penalty"
+            ),
+            gr.Checkbox(label="Stream output", value=True),
         ],
         outputs=[
-            gr.inputs.Textbox(
+            gr.Textbox(
                 lines=5,
                 label="Output",
             )
